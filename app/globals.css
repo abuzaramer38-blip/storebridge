@@ -1,0 +1,87 @@
+@import "tailwindcss";
+
+@theme {
+  /* Neutral chrome — a disciplined, cool near-black rather than pure gray */
+  --color-bg: #0a0c10;
+  --color-surface: #12151b;
+  --color-surface-hover: #171b23;
+  --color-surface-raised: #1b1f27;
+  --color-border: #232830;
+  --color-border-strong: #333a46;
+  --color-text: #edeff2;
+  --color-text-muted: #99a1af;
+  --color-text-faint: #5b6472;
+
+  /* The one signature move: each platform tints the UI with its own
+     real brand color, so the interface visibly "becomes" whichever
+     store you're bridging from. Everything else stays neutral. */
+  --color-shopify: #00a86b;
+  --color-shopify-deep: #007a50;
+  --color-shopify-soft: #0c1f19;
+
+  --color-woo: #9b7fd4;
+  --color-woo-deep: #7f54b3;
+  --color-woo-soft: #1c1730;
+
+  --font-sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  --font-mono: ui-monospace, "SF Mono", "Cascadia Code", "Roboto Mono", Menlo, Consolas, monospace;
+}
+
+@layer base {
+  * {
+    border-color: var(--color-border);
+  }
+
+  body {
+    background-color: var(--color-bg);
+    color: var(--color-text);
+  }
+
+  ::selection {
+    background-color: color-mix(in srgb, var(--color-shopify) 35%, transparent);
+  }
+
+  /* Visible keyboard focus everywhere, no exceptions. */
+  :focus-visible {
+    outline: 2px solid var(--color-text-muted);
+    outline-offset: 2px;
+    border-radius: 4px;
+  }
+
+  ::-webkit-scrollbar {
+    width: 10px;
+    height: 10px;
+  }
+  ::-webkit-scrollbar-track {
+    background: transparent;
+  }
+  ::-webkit-scrollbar-thumb {
+    background-color: var(--color-border-strong);
+    border-radius: 999px;
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    *,
+    *::before,
+    *::after {
+      animation-duration: 0.01ms !important;
+      animation-iteration-count: 1 !important;
+      transition-duration: 0.01ms !important;
+    }
+  }
+}
+
+@keyframes fade-in-up {
+  from {
+    opacity: 0;
+    transform: translateY(4px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.animate-row-in {
+  animation: fade-in-up 240ms ease-out both;
+}
