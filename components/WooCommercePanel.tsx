@@ -23,75 +23,105 @@ export function WooCommercePanel() {
 
   const canSubmit = siteUrl.trim().length > 0;
 
-  const handleFetch = useCallback(async () => {
-    setStatus("loading");
-    setError(null);
-    setProducts([]);
-    setFetchedCount(0);
-    setTotalCount(null);
+  // Where to pick up again if a long run stops part-way (products so far are kept).
+  const [resumeFrom, setResumeFrom] = useState<{ page: number; products: NormalizedProduct[] } | null>(null);
 
-    const normalizedUrl = normalizeUrl(siteUrl);
-    let page: number | null = 1;
-    let collected: NormalizedProduct[] = [];
-    let rateLimitRetries = 0;
-    const MAX_RATE_LIMIT_RETRIES = 15;
-    const PAGE_DELAY_MS = 1200;
+  const runFetch = useCallback(
+    async (startPage: number, startProducts: NormalizedProduct[]) => {
+      setStatus("loading");
+      setError(null);
+      setResumeFrom(null);
+      setProducts(startProducts);
+      setFetchedCount(startProducts.length);
+      if (startProducts.length === 0) setTotalCount(null);
 
-    try {
-      while (true) {
-        const response: Response = await fetch("/api/woocommerce/products", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ siteUrl: normalizedUrl, page }),
-        });
+      const normalizedUrl = normalizeUrl(siteUrl);
+      let page: number | null = startPage;
+      let collected: NormalizedProduct[] = startProducts;
+      let rateLimitRetries = 0;
+      const MAX_RATE_LIMIT_RETRIES = 20;
+      // Starts fast; slows down automatically if the store pushes back, speeds up again after.
+      let pageDelayMs = 300;
 
-        let data: {
-          success: boolean;
-          rateLimited?: boolean;
-          retryAfterMs?: number;
-          error?: string;
-          products?: NormalizedProduct[];
-          pageInfo?: { hasNextPage: boolean; nextPage: number | null; totalCount: number | null };
-        };
-        try {
-          data = await response.json();
-        } catch {
-          // Non-JSON reply (e.g. Vercel 504 timeout page) — treat gateway/limit errors as retryable.
-          data = {
-            success: false,
-            rateLimited: [429, 502, 503, 504].includes(response.status),
-            error: `HTTP ${response.status}`,
+      try {
+        while (true) {
+          let response: Response | null = null;
+          try {
+            response = await fetch("/api/woocommerce/products", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ siteUrl: normalizedUrl, page }),
+            });
+          } catch {
+            response = null; // our own connection dropped — retry below
+          }
+
+          let data: {
+            success: boolean;
+            rateLimited?: boolean;
+            retryAfterMs?: number;
+            error?: string;
+            products?: NormalizedProduct[];
+            pageInfo?: { hasNextPage: boolean; nextPage: number | null; totalCount: number | null };
           };
-        }
-        if (!data.success && data.rateLimited && rateLimitRetries < MAX_RATE_LIMIT_RETRIES) {
-          rateLimitRetries += 1;
-          const wait = Math.min(Math.max(Number(data.retryAfterMs) || 0, 5000 * rateLimitRetries), 60_000);
-          setError(`Site is rate-limiting — waiting ${Math.round(wait / 1000)}s then retrying page ${page}…`);
-          await sleep(wait);
-          continue; // same page again
-        }
-        if (!data.success) {
-          throw new Error(data.error || "Something went wrong while fetching from WooCommerce.");
+          if (!response) {
+            data = { success: false, rateLimited: true, error: "Network error" };
+          } else {
+            try {
+              data = await response.json();
+            } catch {
+              // Non-JSON reply (e.g. Vercel 504 timeout page) — treat gateway/limit errors as retryable.
+              data = {
+                success: false,
+                rateLimited: [429, 502, 503, 504].includes(response.status),
+                error: `HTTP ${response.status}`,
+              };
+            }
+          }
+
+          // On the very first page with nothing fetched yet, fail fast (likely a wrong URL).
+          const retryCap = collected.length === 0 ? 2 : MAX_RATE_LIMIT_RETRIES;
+          if (!data.success && data.rateLimited && rateLimitRetries < retryCap) {
+            rateLimitRetries += 1;
+            pageDelayMs = Math.min(pageDelayMs * 2 + 1000, 8000);
+            const wait = Math.min(Math.max(Number(data.retryAfterMs) || 0, 4000 * rateLimitRetries), 60_000);
+            setError(
+              `Store is slowing us down — waiting ${Math.round(wait / 1000)}s, then retrying page ${page} (try ${rateLimitRetries}/${retryCap})…`
+            );
+            await sleep(wait);
+            continue; // same page again
+          }
+          if (!data.success) {
+            throw new Error(data.error || "Something went wrong while fetching from WooCommerce.");
+          }
+
+          collected = collected.concat(data.products ?? []);
+          setProducts([...collected]);
+          setFetchedCount(collected.length);
+          if (typeof data.pageInfo?.totalCount === "number") setTotalCount(data.pageInfo.totalCount);
+
+          rateLimitRetries = 0;
+          pageDelayMs = Math.max(300, Math.floor(pageDelayMs * 0.7));
+          setError(null);
+          page = data.pageInfo?.hasNextPage ? data.pageInfo.nextPage : null;
+          if (!page) break;
+          await sleep(pageDelayMs);
         }
 
-        collected = collected.concat(data.products ?? []);
-        setProducts([...collected]);
-        setFetchedCount(collected.length);
-        if (typeof data.pageInfo?.totalCount === "number") setTotalCount(data.pageInfo.totalCount);
-
-        rateLimitRetries = 0;
-        setError(null);
-        page = data.pageInfo?.hasNextPage ? data.pageInfo.nextPage : null;
-        if (!page) break;
-        await sleep(PAGE_DELAY_MS); // be gentle with the store's server
+        setStatus("success");
+      } catch (err) {
+        setError(err instanceof Error ? err.message : "Unknown error.");
+        setStatus("error");
+        if (page && collected.length > 0) setResumeFrom({ page, products: collected });
       }
+    },
+    [siteUrl]
+  );
 
-      setStatus("success");
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Unknown error.");
-      setStatus("error");
-    }
-  }, [siteUrl]);
+  const handleFetch = useCallback(() => runFetch(1, []), [runFetch]);
+  const handleResume = useCallback(() => {
+    if (resumeFrom) runFetch(resumeFrom.page, resumeFrom.products);
+  }, [resumeFrom, runFetch]);
 
   const progress =
     totalCount && totalCount > 0 ? Math.min(100, (fetchedCount / totalCount) * 100) : status === "loading" ? 15 : 0;
@@ -146,6 +176,17 @@ export function WooCommercePanel() {
         {status === "error" && error && (
           <div className="mt-3 rounded-lg border border-red-500/20 bg-red-500/10 px-3 py-2 text-xs text-red-400">
             {error}
+            {resumeFrom && (
+              <div className="mt-2 flex flex-wrap items-center gap-2 text-text-muted">
+                <span>
+                  {resumeFrom.products.length} products are kept. You can export them now, or continue from page{" "}
+                  {resumeFrom.page}.
+                </span>
+                <Button variant="primary" accent="woo" onClick={handleResume}>
+                  Resume from page {resumeFrom.page}
+                </Button>
+              </div>
+            )}
           </div>
         )}
       </div>

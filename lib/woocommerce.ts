@@ -24,7 +24,8 @@ import { sleep, withConcurrency } from "./utils";
  * (e.g. "1999" cents + currency_minor_unit: 2 = $19.99) — priceFromMinorUnits()
  * below converts that to a normal decimal.
  */
-const PAGE_SIZE = 20;
+const PAGE_SIZE = 50;
+const VARIATION_BATCH_SIZE = 100;
 const CATEGORY_PAGE_SIZE = 100;
 const VARIATION_CONCURRENCY = 2;
 const MAX_RETRIES = 2;
@@ -92,7 +93,13 @@ async function storeApiFetch(
       if (err instanceof Error && (err.name === "TimeoutError" || err.name === "AbortError")) {
         throw new WooCommerceRateLimitError(`${siteUrl} timed out. Waiting and retrying…`, 5000);
       }
-      throw new WooCommerceApiError(`Couldn't reach ${siteUrl}. Check the site URL and that it's online.`);
+      // Connection reset / refused mid-run is usually the host's firewall throttling us — retry.
+      if (attempt < MAX_RETRIES && Date.now() + 3000 < budget.deadline - 3000) {
+        await sleep(3000);
+        attempt += 1;
+        continue;
+      }
+      throw new WooCommerceRateLimitError(`Couldn't reach ${siteUrl} right now. Waiting and retrying…`, 10_000);
     }
     if (!RETRY_STATUSES.has(response.status)) break;
     const wait = retryDelayMs(response, attempt);
@@ -204,9 +211,12 @@ function buildVariantFromSimpleProduct(p: any): NormalizedVariant {
   };
 }
 
-function buildVariantFromVariation(v: any): NormalizedVariant {
+function buildVariantFromVariation(v: any, parentAttrs?: any[]): NormalizedVariant {
   const minorUnit = v.prices?.currency_minor_unit ?? 2;
-  const attrs = Array.isArray(v.attributes) ? v.attributes : [];
+  // Many stores return an empty `attributes` on the variation itself; the parent's
+  // `variations[]` entry always carries the name/value pairs, so prefer that.
+  const own = Array.isArray(v.attributes) ? v.attributes.filter((a: any) => a?.value) : [];
+  const attrs = parentAttrs && parentAttrs.length > 0 ? parentAttrs : own;
   return {
     id: String(v.id),
     title: attrs.map((a: any) => a.value).filter(Boolean).join(" / ") || v.name || "Variation",
@@ -224,17 +234,43 @@ function buildVariantFromVariation(v: any): NormalizedVariant {
   };
 }
 
-async function fetchVariations(siteUrl: string, productId: number, budget: Budget): Promise<NormalizedVariant[]> {
+/**
+ * Fetch every variation for a whole page of products in a few requests
+ * (`include=id1,id2,...`, 100 at a time) instead of one request per product.
+ * This is what keeps big catalogs fast and under the store's rate limits.
+ */
+async function fetchVariationsForPage(siteUrl: string, products: any[], budget: Budget): Promise<Map<number, any>> {
+  const ids: number[] = [];
+  for (const p of products) {
+    if (Array.isArray(p.variations)) {
+      for (const v of p.variations) if (typeof v?.id === "number") ids.push(v.id);
+    }
+  }
+  const byId = new Map<number, any>();
+  for (let i = 0; i < ids.length; i += VARIATION_BATCH_SIZE) {
+    const chunk = ids.slice(i, i + VARIATION_BATCH_SIZE);
+    const { json } = await storeApiFetch(
+      siteUrl,
+      `/products?type=variation&include=${chunk.join(",")}&per_page=${VARIATION_BATCH_SIZE}`,
+      budget
+    );
+    if (Array.isArray(json)) for (const v of json) byId.set(v.id, v);
+  }
+  return byId;
+}
+
+/** Old per-product path, only used when a product lists options but no variation ids. */
+async function fetchVariationsForProduct(siteUrl: string, productId: number, budget: Budget): Promise<any[]> {
   const { json } = await storeApiFetch(siteUrl, `/products?type=variation&parent=${productId}&per_page=100`, budget);
-  if (!Array.isArray(json) || json.length === 0) return [];
-  return json.map(buildVariantFromVariation);
+  return Array.isArray(json) ? json : [];
 }
 
 async function normalizeStoreProduct(
   p: any,
   categoryMap: Map<number, CategoryEntry>,
   siteUrl: string,
-  budget: Budget
+  budget: Budget,
+  variationsById: Map<number, any>
 ): Promise<NormalizedProduct> {
   const categories: CategoryPath[] = Array.isArray(p.categories)
     ? p.categories.map((c: any) => {
@@ -249,7 +285,18 @@ async function normalizeStoreProduct(
     position: index + 1,
   }));
 
-  const variants = p.has_options ? await fetchVariations(siteUrl, p.id, budget) : [];
+  let variants: NormalizedVariant[] = [];
+  const listed: any[] = Array.isArray(p.variations) ? p.variations : [];
+  if (listed.length > 0) {
+    variants = listed
+      .map((entry) => {
+        const full = variationsById.get(entry.id);
+        return full ? buildVariantFromVariation(full, entry.attributes) : null;
+      })
+      .filter((v): v is NormalizedVariant => v !== null);
+  } else if (p.type === "variable") {
+    variants = (await fetchVariationsForProduct(siteUrl, p.id, budget)).map((v) => buildVariantFromVariation(v));
+  }
   const finalVariants = variants.length > 0 ? variants : [buildVariantFromSimpleProduct(p)];
 
   const totalInventory = finalVariants.reduce<number | null>((sum, v) => {
@@ -295,8 +342,10 @@ export async function fetchWooCommerceProductsPage(
     throw new WooCommerceApiError("Unexpected response shape from the WooCommerce Store API.");
   }
 
+  const variationsById = await fetchVariationsForPage(creds.siteUrl, json, budget);
+
   const products = await withConcurrency(json, VARIATION_CONCURRENCY, (product) =>
-    normalizeStoreProduct(product, categoryMap, creds.siteUrl, budget)
+    normalizeStoreProduct(product, categoryMap, creds.siteUrl, budget, variationsById)
   );
 
   const totalPages = Number(headers.get("x-wp-totalpages") || "1");
