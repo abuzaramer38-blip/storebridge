@@ -4,6 +4,55 @@ import { useCallback, useState } from "react";
 import { Info, Link2, PlugZap } from "lucide-react";
 import type { NormalizedProduct } from "@/lib/types";
 import { normalizeUrl, sleep } from "@/lib/utils";
+import { canFetchDirectly, fetchWooCommerceProductsPage, WooCommerceRateLimitError } from "@/lib/woocommerce";
+
+type PageResult = {
+  success: boolean;
+  rateLimited?: boolean;
+  retryAfterMs?: number;
+  error?: string;
+  products?: NormalizedProduct[];
+  pageInfo?: { hasNextPage: boolean; nextPage: number | null; totalCount: number | null };
+};
+
+type Route = "browser" | "server";
+
+/** Fetch one page straight from the browser (user's own IP). */
+async function getPageInBrowser(siteUrl: string, page: number): Promise<PageResult> {
+  try {
+    const r = await fetchWooCommerceProductsPage({ siteUrl }, page);
+    return { success: true, products: r.products, pageInfo: r.pageInfo };
+  } catch (err) {
+    if (err instanceof WooCommerceRateLimitError) {
+      return { success: false, rateLimited: true, retryAfterMs: err.retryAfterMs, error: err.message };
+    }
+    return { success: false, error: err instanceof Error ? err.message : "Unknown error." };
+  }
+}
+
+/** Fetch one page through our Vercel API route (Vercel's IP). */
+async function getPageViaServer(siteUrl: string, page: number): Promise<PageResult> {
+  let response: Response;
+  try {
+    response = await fetch("/api/woocommerce/products", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ siteUrl, page }),
+    });
+  } catch {
+    return { success: false, rateLimited: true, error: "Network error" };
+  }
+  try {
+    return (await response.json()) as PageResult;
+  } catch {
+    // Non-JSON reply (e.g. Vercel 504 timeout page) — treat gateway/limit errors as retryable.
+    return {
+      success: false,
+      rateLimited: [429, 502, 503, 504].includes(response.status),
+      error: `HTTP ${response.status}`,
+    };
+  }
+}
 import { Button } from "@/components/ui/Button";
 import { Field, Input } from "@/components/ui/Input";
 import { ProgressBar, StatCard } from "@/components/ui/Feedback";
@@ -39,57 +88,40 @@ export function WooCommercePanel() {
       let page: number | null = startPage;
       let collected: NormalizedProduct[] = startProducts;
       let rateLimitRetries = 0;
-      const MAX_RATE_LIMIT_RETRIES = 20;
+      const MAX_RATE_LIMIT_RETRIES = 30;
       // Starts fast; slows down automatically if the store pushes back, speeds up again after.
       let pageDelayMs = 300;
 
+      // Prefer the browser route (user's own IP); fall back to / alternate with the server route.
+      const browserOk = await canFetchDirectly(normalizedUrl);
+      let route: Route = browserOk ? "browser" : "server";
+
       try {
         while (true) {
-          let response: Response | null = null;
-          try {
-            response = await fetch("/api/woocommerce/products", {
-              method: "POST",
-              headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({ siteUrl: normalizedUrl, page }),
-            });
-          } catch {
-            response = null; // our own connection dropped — retry below
-          }
-
-          let data: {
-            success: boolean;
-            rateLimited?: boolean;
-            retryAfterMs?: number;
-            error?: string;
-            products?: NormalizedProduct[];
-            pageInfo?: { hasNextPage: boolean; nextPage: number | null; totalCount: number | null };
-          };
-          if (!response) {
-            data = { success: false, rateLimited: true, error: "Network error" };
-          } else {
-            try {
-              data = await response.json();
-            } catch {
-              // Non-JSON reply (e.g. Vercel 504 timeout page) — treat gateway/limit errors as retryable.
-              data = {
-                success: false,
-                rateLimited: [429, 502, 503, 504].includes(response.status),
-                error: `HTTP ${response.status}`,
-              };
-            }
-          }
+          const data: PageResult =
+            route === "browser"
+              ? await getPageInBrowser(normalizedUrl, page as number)
+              : await getPageViaServer(normalizedUrl, page as number);
 
           // On the very first page with nothing fetched yet, fail fast (likely a wrong URL).
           const retryCap = collected.length === 0 ? 2 : MAX_RATE_LIMIT_RETRIES;
           if (!data.success && data.rateLimited && rateLimitRetries < retryCap) {
             rateLimitRetries += 1;
+            // One IP got blocked — try the other one (browser ⇄ server) on the next attempt.
+            if (browserOk) route = route === "browser" ? "server" : "browser";
             pageDelayMs = Math.min(pageDelayMs * 2 + 1000, 8000);
             const wait = Math.min(Math.max(Number(data.retryAfterMs) || 0, 4000 * rateLimitRetries), 60_000);
             setError(
-              `Store is slowing us down — waiting ${Math.round(wait / 1000)}s, then retrying page ${page} (try ${rateLimitRetries}/${retryCap})…`
+              `${data.error || "Store is slowing us down"} — waiting ${Math.round(wait / 1000)}s, then retrying page ${page} via ${route} (try ${rateLimitRetries}/${retryCap})…`
             );
             await sleep(wait);
             continue; // same page again
+          }
+          if (!data.success && route === "browser" && rateLimitRetries < retryCap) {
+            // Something odd only the browser hit — give the server route one go before failing.
+            rateLimitRetries += 1;
+            route = "server";
+            continue;
           }
           if (!data.success) {
             throw new Error(data.error || "Something went wrong while fetching from WooCommerce.");

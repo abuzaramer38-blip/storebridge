@@ -119,6 +119,13 @@ async function storeApiFetch(
   try {
     json = JSON.parse(raw);
   } catch {
+    // A firewall/host block page (403 / 429 / 5xx HTML) is temporary — retry later instead of failing.
+    if (response.status === 403 || response.status === 429 || response.status >= 500) {
+      throw new WooCommerceRateLimitError(
+        `${siteUrl} temporarily blocked requests (HTTP ${response.status}). Waiting and retrying…`,
+        15_000
+      );
+    }
     throw new WooCommerceApiError(
       `${siteUrl} didn't return JSON (HTTP ${response.status}). Check this is a WooCommerce site and nothing is blocking API requests.`
     );
@@ -323,6 +330,25 @@ async function normalizeStoreProduct(
     createdAt: null,
     updatedAt: null,
   };
+}
+
+/**
+ * Can the browser call this store's Store API directly (CORS allowed)?
+ * WordPress sends CORS headers on REST responses by default, so this usually works —
+ * and then requests come from the user's own IP instead of Vercel's shared one.
+ */
+export async function canFetchDirectly(siteUrl: string): Promise<boolean> {
+  try {
+    const res = await fetch(`${siteUrl}/wp-json/wc/store/v1/products?per_page=1`, {
+      headers: { Accept: "application/json" },
+      signal: AbortSignal.timeout(10_000),
+    });
+    if (!res.ok) return false;
+    const json = await res.json();
+    return Array.isArray(json);
+  } catch {
+    return false;
+  }
 }
 
 export async function fetchWooCommerceProductsPage(
