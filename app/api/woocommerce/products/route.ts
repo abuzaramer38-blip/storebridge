@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { z } from "zod";
-import { fetchWooCommerceProductsPage } from "@/lib/woocommerce";
+import { fetchWooCommerceProductsPage, WooCommerceRateLimitError } from "@/lib/woocommerce";
 
 export const maxDuration = 60;
 
@@ -36,6 +36,12 @@ export async function POST(request: Request) {
       pageInfo: result.pageInfo,
     });
   } catch (error) {
+    if (error instanceof WooCommerceRateLimitError) {
+      return NextResponse.json(
+        { success: false, rateLimited: true, retryAfterMs: error.retryAfterMs, error: error.message },
+        { status: 429 }
+      );
+    }
     return NextResponse.json(
       {
         success: false,
