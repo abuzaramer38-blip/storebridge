@@ -4,7 +4,7 @@ import { normalizeUrl } from "@/lib/utils";
 export const maxDuration = 60;
 
 /**
- * GET /api/woocommerce/bestsellers?siteUrl=example.com&limit=200[&format=csv]
+ * GET /api/woocommerce/bestsellers?siteUrl=example.com&limit=100[&page=2][&format=csv]
  *
  * Returns a store's products in WooCommerce "popularity" order (total sales, highest first),
  * via the public Store API. Only a compact list — rank, id, name, price, sku, link.
@@ -19,12 +19,14 @@ export async function GET(request: Request) {
   const siteUrl = normalizeUrl(rawSite);
   const limit = Math.min(Math.max(Number(params.get("limit")) || 100, 1), 500);
   const perPage = Math.min(limit, 100);
+  // Optional: start from a later page (e.g. page=2 with limit=100 → ranks 101–200).
+  const startPage = Math.max(Number(params.get("page")) || 1, 1);
 
   type Row = { rank: number; id: number; name: string; price: number | null; sku: string; link: string };
   const rows: Row[] = [];
 
   try {
-    for (let page = 1; rows.length < limit; page += 1) {
+    for (let page = startPage; rows.length < limit; page += 1) {
       const res = await fetch(
         `${siteUrl}/wp-json/wc/store/v1/products?orderby=popularity&order=desc&per_page=${perPage}&page=${page}`,
         { headers: { Accept: "application/json" }, signal: AbortSignal.timeout(25_000) }
@@ -37,7 +39,7 @@ export async function GET(request: Request) {
         const minor = p.prices?.currency_minor_unit ?? 2;
         const raw = p.prices?.price;
         rows.push({
-          rank: rows.length + 1,
+          rank: (startPage - 1) * perPage + rows.length + 1,
           id: p.id,
           name: String(p.name ?? "")
             .replace(/&#0?38;/g, "&")
