@@ -3,7 +3,7 @@
 import { useCallback, useState } from "react";
 import { Info, Link2, PlugZap } from "lucide-react";
 import type { NormalizedProduct } from "@/lib/types";
-import { normalizeUrl } from "@/lib/utils";
+import { normalizeUrl, sleep } from "@/lib/utils";
 import { Button } from "@/components/ui/Button";
 import { Field, Input } from "@/components/ui/Input";
 import { ProgressBar, StatCard } from "@/components/ui/Feedback";
@@ -33,6 +33,9 @@ export function WooCommercePanel() {
     const normalizedUrl = normalizeUrl(siteUrl);
     let page: number | null = 1;
     let collected: NormalizedProduct[] = [];
+    let rateLimitRetries = 0;
+    const MAX_RATE_LIMIT_RETRIES = 6;
+    const PAGE_DELAY_MS = 1200;
 
     try {
       while (true) {
@@ -42,18 +45,40 @@ export function WooCommercePanel() {
           body: JSON.stringify({ siteUrl: normalizedUrl, page }),
         });
 
-        const data = await response.json();
+        let data: {
+          success: boolean;
+          rateLimited?: boolean;
+          retryAfterMs?: number;
+          error?: string;
+          products?: NormalizedProduct[];
+          pageInfo?: { hasNextPage: boolean; nextPage: number | null; totalCount: number | null };
+        };
+        try {
+          data = await response.json();
+        } catch {
+          data = { success: false, rateLimited: response.status === 429, error: `HTTP ${response.status}` };
+        }
+        if (!data.success && data.rateLimited && rateLimitRetries < MAX_RATE_LIMIT_RETRIES) {
+          rateLimitRetries += 1;
+          const wait = Math.max(Number(data.retryAfterMs) || 0, 5000 * rateLimitRetries);
+          setError(`Site is rate-limiting — waiting ${Math.round(wait / 1000)}s then retrying page ${page}…`);
+          await sleep(wait);
+          continue; // same page again
+        }
         if (!data.success) {
           throw new Error(data.error || "Something went wrong while fetching from WooCommerce.");
         }
 
-        collected = collected.concat(data.products);
+        collected = collected.concat(data.products ?? []);
         setProducts([...collected]);
         setFetchedCount(collected.length);
-        if (typeof data.pageInfo.totalCount === "number") setTotalCount(data.pageInfo.totalCount);
+        if (typeof data.pageInfo?.totalCount === "number") setTotalCount(data.pageInfo.totalCount);
 
-        page = data.pageInfo.hasNextPage ? data.pageInfo.nextPage : null;
+        rateLimitRetries = 0;
+        setError(null);
+        page = data.pageInfo?.hasNextPage ? data.pageInfo.nextPage : null;
         if (!page) break;
+        await sleep(PAGE_DELAY_MS); // be gentle with the store's server
       }
 
       setStatus("success");
@@ -127,6 +152,7 @@ export function WooCommercePanel() {
             Fetched {fetchedCount}
             {totalCount ? ` of ${totalCount}` : ""} products…
           </p>
+          {error && <p className="text-xs text-amber-400">{error}</p>}
         </div>
       )}
 
