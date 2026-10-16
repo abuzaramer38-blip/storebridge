@@ -4,7 +4,7 @@
    boundary is deliberate — everything downstream of
    normalizeStoreProduct() is fully typed via NormalizedProduct. */
 import type { CategoryPath, FetchProductsResult, NormalizedImage, NormalizedProduct, NormalizedVariant } from "./types";
-import { withConcurrency } from "./utils";
+import { sleep, withConcurrency } from "./utils";
 
 /**
  * WooCommerce's Store API (wp-json/wc/store/v1) is the public, cookie-based
@@ -26,7 +26,11 @@ import { withConcurrency } from "./utils";
  */
 const PAGE_SIZE = 20;
 const CATEGORY_PAGE_SIZE = 100;
-const VARIATION_CONCURRENCY = 4;
+const VARIATION_CONCURRENCY = 2;
+const MAX_RETRIES = 4;
+const MAX_WAIT_MS = 15_000;
+const RETRY_STATUSES = new Set([429, 503]);
+const CATEGORY_CACHE_TTL_MS = 10 * 60 * 1000;
 
 export interface WooCommercePublicCredentials {
   siteUrl: string; // normalized, e.g. "https://example.com"
@@ -34,13 +38,48 @@ export interface WooCommercePublicCredentials {
 
 class WooCommerceApiError extends Error {}
 
+/** Server asked us to slow down — tells the client to wait and retry this page. */
+export class WooCommerceRateLimitError extends Error {
+  retryAfterMs: number;
+  constructor(message: string, retryAfterMs: number) {
+    super(message);
+    this.retryAfterMs = retryAfterMs;
+  }
+}
+
+function retryDelayMs(response: Response, attempt: number): number {
+  const header = response.headers.get("retry-after");
+  if (header) {
+    const seconds = Number(header);
+    if (!Number.isNaN(seconds)) return Math.min(seconds * 1000, MAX_WAIT_MS);
+    const date = Date.parse(header);
+    if (!Number.isNaN(date)) return Math.min(Math.max(date - Date.now(), 1000), MAX_WAIT_MS);
+  }
+  // 2s, 4s, 8s, 15s + jitter
+  return Math.min(2000 * 2 ** attempt, MAX_WAIT_MS) + Math.floor(Math.random() * 500);
+}
+
 async function storeApiFetch(siteUrl: string, path: string): Promise<{ json: any; headers: Headers }> {
   const url = `${siteUrl}/wp-json/wc/store/v1${path}`;
   let response: Response;
-  try {
-    response = await fetch(url, { headers: { Accept: "application/json" } });
-  } catch {
-    throw new WooCommerceApiError(`Couldn't reach ${siteUrl}. Check the site URL and that it's online.`);
+  let attempt = 0;
+  while (true) {
+    try {
+      response = await fetch(url, { headers: { Accept: "application/json" } });
+    } catch {
+      throw new WooCommerceApiError(`Couldn't reach ${siteUrl}. Check the site URL and that it's online.`);
+    }
+    if (!RETRY_STATUSES.has(response.status)) break;
+    const wait = retryDelayMs(response, attempt);
+    if (attempt >= MAX_RETRIES) {
+      throw new WooCommerceRateLimitError(
+        `${siteUrl} is rate-limiting requests (HTTP ${response.status}). Waiting and retrying…`,
+        wait
+      );
+    }
+    await response.body?.cancel().catch(() => {});
+    await sleep(wait);
+    attempt += 1;
   }
 
   const raw = await response.text();
@@ -68,6 +107,16 @@ async function storeApiFetch(siteUrl: string, path: string): Promise<{ json: any
 interface CategoryEntry {
   name: string;
   parent: number;
+}
+
+const categoryCache = new Map<string, { map: Map<number, CategoryEntry>; at: number }>();
+
+async function getCategories(siteUrl: string): Promise<Map<number, CategoryEntry>> {
+  const cached = categoryCache.get(siteUrl);
+  if (cached && Date.now() - cached.at < CATEGORY_CACHE_TTL_MS) return cached.map;
+  const map = await fetchAllCategories(siteUrl);
+  categoryCache.set(siteUrl, { map, at: Date.now() });
+  return map;
 }
 
 async function fetchAllCategories(siteUrl: string): Promise<Map<number, CategoryEntry>> {
@@ -206,7 +255,7 @@ export async function fetchWooCommerceProductsPage(
   creds: WooCommercePublicCredentials,
   page: number
 ): Promise<FetchProductsResult> {
-  const categoryMap = await fetchAllCategories(creds.siteUrl);
+  const categoryMap = await getCategories(creds.siteUrl);
 
   const { json, headers } = await storeApiFetch(creds.siteUrl, `/products?per_page=${PAGE_SIZE}&page=${page}`);
 
