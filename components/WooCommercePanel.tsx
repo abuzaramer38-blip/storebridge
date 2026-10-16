@@ -34,7 +34,7 @@ export function WooCommercePanel() {
     let page: number | null = 1;
     let collected: NormalizedProduct[] = [];
     let rateLimitRetries = 0;
-    const MAX_RATE_LIMIT_RETRIES = 6;
+    const MAX_RATE_LIMIT_RETRIES = 15;
     const PAGE_DELAY_MS = 1200;
 
     try {
@@ -56,11 +56,16 @@ export function WooCommercePanel() {
         try {
           data = await response.json();
         } catch {
-          data = { success: false, rateLimited: response.status === 429, error: `HTTP ${response.status}` };
+          // Non-JSON reply (e.g. Vercel 504 timeout page) — treat gateway/limit errors as retryable.
+          data = {
+            success: false,
+            rateLimited: [429, 502, 503, 504].includes(response.status),
+            error: `HTTP ${response.status}`,
+          };
         }
         if (!data.success && data.rateLimited && rateLimitRetries < MAX_RATE_LIMIT_RETRIES) {
           rateLimitRetries += 1;
-          const wait = Math.max(Number(data.retryAfterMs) || 0, 5000 * rateLimitRetries);
+          const wait = Math.min(Math.max(Number(data.retryAfterMs) || 0, 5000 * rateLimitRetries), 60_000);
           setError(`Site is rate-limiting — waiting ${Math.round(wait / 1000)}s then retrying page ${page}…`);
           await sleep(wait);
           continue; // same page again

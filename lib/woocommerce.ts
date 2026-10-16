@@ -27,9 +27,12 @@ import { sleep, withConcurrency } from "./utils";
 const PAGE_SIZE = 20;
 const CATEGORY_PAGE_SIZE = 100;
 const VARIATION_CONCURRENCY = 2;
-const MAX_RETRIES = 4;
-const MAX_WAIT_MS = 15_000;
-const RETRY_STATUSES = new Set([429, 503]);
+const MAX_RETRIES = 2;
+const MAX_WAIT_MS = 8_000;
+const REQUEST_TIMEOUT_MS = 20_000;
+/** Vercel kills the function at maxDuration (60s). Stop well before that and let the client retry. */
+const REQUEST_BUDGET_MS = 40_000;
+const RETRY_STATUSES = new Set([429, 502, 503, 504, 508]);
 const CATEGORY_CACHE_TTL_MS = 10 * 60 * 1000;
 
 export interface WooCommercePublicCredentials {
@@ -59,19 +62,41 @@ function retryDelayMs(response: Response, attempt: number): number {
   return Math.min(2000 * 2 ** attempt, MAX_WAIT_MS) + Math.floor(Math.random() * 500);
 }
 
-async function storeApiFetch(siteUrl: string, path: string): Promise<{ json: any; headers: Headers }> {
+interface Budget {
+  deadline: number;
+}
+
+function newBudget(): Budget {
+  return { deadline: Date.now() + REQUEST_BUDGET_MS };
+}
+
+async function storeApiFetch(
+  siteUrl: string,
+  path: string,
+  budget: Budget
+): Promise<{ json: any; headers: Headers }> {
   const url = `${siteUrl}/wp-json/wc/store/v1${path}`;
   let response: Response;
   let attempt = 0;
   while (true) {
+    const remaining = budget.deadline - Date.now();
+    if (remaining < 3000) {
+      throw new WooCommerceRateLimitError(`${siteUrl} is responding slowly. Waiting and retrying…`, 5000);
+    }
     try {
-      response = await fetch(url, { headers: { Accept: "application/json" } });
-    } catch {
+      response = await fetch(url, {
+        headers: { Accept: "application/json" },
+        signal: AbortSignal.timeout(Math.min(REQUEST_TIMEOUT_MS, remaining)),
+      });
+    } catch (err) {
+      if (err instanceof Error && (err.name === "TimeoutError" || err.name === "AbortError")) {
+        throw new WooCommerceRateLimitError(`${siteUrl} timed out. Waiting and retrying…`, 5000);
+      }
       throw new WooCommerceApiError(`Couldn't reach ${siteUrl}. Check the site URL and that it's online.`);
     }
     if (!RETRY_STATUSES.has(response.status)) break;
     const wait = retryDelayMs(response, attempt);
-    if (attempt >= MAX_RETRIES) {
+    if (attempt >= MAX_RETRIES || Date.now() + wait > budget.deadline - 3000) {
       throw new WooCommerceRateLimitError(
         `${siteUrl} is rate-limiting requests (HTTP ${response.status}). Waiting and retrying…`,
         wait
@@ -111,21 +136,22 @@ interface CategoryEntry {
 
 const categoryCache = new Map<string, { map: Map<number, CategoryEntry>; at: number }>();
 
-async function getCategories(siteUrl: string): Promise<Map<number, CategoryEntry>> {
+async function getCategories(siteUrl: string, budget: Budget): Promise<Map<number, CategoryEntry>> {
   const cached = categoryCache.get(siteUrl);
   if (cached && Date.now() - cached.at < CATEGORY_CACHE_TTL_MS) return cached.map;
-  const map = await fetchAllCategories(siteUrl);
+  const map = await fetchAllCategories(siteUrl, budget);
   categoryCache.set(siteUrl, { map, at: Date.now() });
   return map;
 }
 
-async function fetchAllCategories(siteUrl: string): Promise<Map<number, CategoryEntry>> {
+async function fetchAllCategories(siteUrl: string, budget: Budget): Promise<Map<number, CategoryEntry>> {
   const map = new Map<number, CategoryEntry>();
   let page = 1;
   for (let safety = 0; safety < 200; safety += 1) {
     const { json, headers } = await storeApiFetch(
       siteUrl,
-      `/products/categories?per_page=${CATEGORY_PAGE_SIZE}&page=${page}`
+      `/products/categories?per_page=${CATEGORY_PAGE_SIZE}&page=${page}`,
+      budget
     );
     if (!Array.isArray(json) || json.length === 0) break;
     for (const cat of json) {
@@ -198,8 +224,8 @@ function buildVariantFromVariation(v: any): NormalizedVariant {
   };
 }
 
-async function fetchVariations(siteUrl: string, productId: number): Promise<NormalizedVariant[]> {
-  const { json } = await storeApiFetch(siteUrl, `/products?type=variation&parent=${productId}&per_page=100`);
+async function fetchVariations(siteUrl: string, productId: number, budget: Budget): Promise<NormalizedVariant[]> {
+  const { json } = await storeApiFetch(siteUrl, `/products?type=variation&parent=${productId}&per_page=100`, budget);
   if (!Array.isArray(json) || json.length === 0) return [];
   return json.map(buildVariantFromVariation);
 }
@@ -207,7 +233,8 @@ async function fetchVariations(siteUrl: string, productId: number): Promise<Norm
 async function normalizeStoreProduct(
   p: any,
   categoryMap: Map<number, CategoryEntry>,
-  siteUrl: string
+  siteUrl: string,
+  budget: Budget
 ): Promise<NormalizedProduct> {
   const categories: CategoryPath[] = Array.isArray(p.categories)
     ? p.categories.map((c: any) => {
@@ -222,7 +249,7 @@ async function normalizeStoreProduct(
     position: index + 1,
   }));
 
-  const variants = p.has_options ? await fetchVariations(siteUrl, p.id) : [];
+  const variants = p.has_options ? await fetchVariations(siteUrl, p.id, budget) : [];
   const finalVariants = variants.length > 0 ? variants : [buildVariantFromSimpleProduct(p)];
 
   const totalInventory = finalVariants.reduce<number | null>((sum, v) => {
@@ -255,16 +282,21 @@ export async function fetchWooCommerceProductsPage(
   creds: WooCommercePublicCredentials,
   page: number
 ): Promise<FetchProductsResult> {
-  const categoryMap = await getCategories(creds.siteUrl);
+  const budget = newBudget();
+  const categoryMap = await getCategories(creds.siteUrl, budget);
 
-  const { json, headers } = await storeApiFetch(creds.siteUrl, `/products?per_page=${PAGE_SIZE}&page=${page}`);
+  const { json, headers } = await storeApiFetch(
+    creds.siteUrl,
+    `/products?per_page=${PAGE_SIZE}&page=${page}`,
+    budget
+  );
 
   if (!Array.isArray(json)) {
     throw new WooCommerceApiError("Unexpected response shape from the WooCommerce Store API.");
   }
 
   const products = await withConcurrency(json, VARIATION_CONCURRENCY, (product) =>
-    normalizeStoreProduct(product, categoryMap, creds.siteUrl)
+    normalizeStoreProduct(product, categoryMap, creds.siteUrl, budget)
   );
 
   const totalPages = Number(headers.get("x-wp-totalpages") || "1");
