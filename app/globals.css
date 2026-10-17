@@ -1,30 +1,39 @@
 @import "tailwindcss";
 
+/*
+  Shipping-label palette: cool label stock, ballpoint-navy ink, and one highlighter
+  colour used only to mark what matters (the store you're looking at, ranked sellers).
+  Platform colours (Shopify green, WooCommerce purple) appear only as small identity marks.
+*/
 @theme {
-  /* Neutral chrome — a disciplined, cool near-black rather than pure gray */
-  --color-bg: #0a0c10;
-  --color-surface: #12151b;
-  --color-surface-hover: #171b23;
-  --color-surface-raised: #1b1f27;
-  --color-border: #232830;
-  --color-border-strong: #333a46;
-  --color-text: #edeff2;
-  --color-text-muted: #99a1af;
-  --color-text-faint: #5b6472;
+  --color-bg: #f2f4ef;
+  --color-surface: #ffffff;
+  --color-surface-hover: #f6f7f3;
+  --color-surface-raised: #eceee8;
+  --color-border: #d6dad9;
+  --color-border-strong: #aeb4b8;
+  --color-text: #1b2333;
+  --color-text-muted: #556072;
+  --color-text-faint: #7f8796;
 
-  /* The one signature move: each platform tints the UI with its own
-     real brand color, so the interface visibly "becomes" whichever
-     store you're bridging from. Everything else stays neutral. */
-  --color-shopify: #00a86b;
-  --color-shopify-deep: #007a50;
-  --color-shopify-soft: #0c1f19;
+  --color-ink: #1b2333;
+  --color-marker: #ffe066;
+  --color-marker-soft: #fff6c7;
 
-  --color-woo: #9b7fd4;
-  --color-woo-deep: #7f54b3;
-  --color-woo-soft: #1c1730;
+  --color-ok: #1e7f4f;
+  --color-bad: #b4362a;
+  --color-warn: #8a5d00;
 
-  --font-sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
-  --font-mono: ui-monospace, "SF Mono", "Cascadia Code", "Roboto Mono", Menlo, Consolas, monospace;
+  --color-shopify: #008060;
+  --color-shopify-deep: #006e52;
+  --color-shopify-soft: #e3f3ec;
+
+  --color-woo: #7f54b3;
+  --color-woo-deep: #674399;
+  --color-woo-soft: #f0eaf8;
+
+  --font-sans: "Archivo", ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, Arial, sans-serif;
+  --font-mono: ui-monospace, "SF Mono", "Cascadia Code", Menlo, Consolas, monospace;
 }
 
 @layer base {
@@ -32,32 +41,25 @@
     border-color: var(--color-border);
   }
 
+  html {
+    -webkit-text-size-adjust: 100%;
+  }
+
   body {
     background-color: var(--color-bg);
     color: var(--color-text);
+    font-feature-settings: "tnum" 1;
   }
 
   ::selection {
-    background-color: color-mix(in srgb, var(--color-shopify) 35%, transparent);
+    background-color: var(--color-marker);
+    color: var(--color-ink);
   }
 
-  /* Visible keyboard focus everywhere, no exceptions. */
   :focus-visible {
-    outline: 2px solid var(--color-text-muted);
+    outline: 2px solid var(--color-ink);
     outline-offset: 2px;
     border-radius: 4px;
-  }
-
-  ::-webkit-scrollbar {
-    width: 10px;
-    height: 10px;
-  }
-  ::-webkit-scrollbar-track {
-    background: transparent;
-  }
-  ::-webkit-scrollbar-thumb {
-    background-color: var(--color-border-strong);
-    border-radius: 999px;
   }
 
   @media (prefers-reduced-motion: reduce) {
@@ -71,17 +73,46 @@
   }
 }
 
-@keyframes fade-in-up {
-  from {
-    opacity: 0;
-    transform: translateY(4px);
+@layer components {
+  /* Expanded-width display type: the one loud typographic move. */
+  .font-display {
+    font-stretch: 125%;
+    font-weight: 800;
+    letter-spacing: -0.015em;
+    line-height: 1.02;
   }
-  to {
-    opacity: 1;
-    transform: translateY(0);
+  .font-wide {
+    font-stretch: 112%;
+  }
+
+  /* A highlighter swipe behind text — used sparingly for "this one matters". */
+  .marker {
+    background-image: linear-gradient(transparent 12%, var(--color-marker) 12%, var(--color-marker) 88%, transparent 88%);
+    padding-inline: 0.18em;
+    box-decoration-break: clone;
+    -webkit-box-decoration-break: clone;
+  }
+
+  /* Label stock: a sheet with a firm ink edge. */
+  .label-sheet {
+    background: var(--color-surface);
+    border: 2px solid var(--color-ink);
+    border-radius: 12px;
   }
 }
 
-.animate-row-in {
-  animation: fade-in-up 240ms ease-out both;
+@keyframes stamp-in {
+  from {
+    opacity: 0;
+    transform: translateY(6px) scale(0.99);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+/* One orchestrated moment: a result sheet lands when a lookup finishes. */
+.animate-stamp {
+  animation: stamp-in 260ms cubic-bezier(0.2, 0.7, 0.2, 1) both;
 }

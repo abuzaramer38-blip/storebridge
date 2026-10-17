@@ -341,7 +341,12 @@ export async function inspectStore(origin: string): Promise<InspectResult> {
     if (shopifyThemeJson) evidence.push("Shopify theme settings in the page");
     if (/cdn\.shopify\.com/.test(html)) evidence.push("Files served from cdn.shopify.com");
     if (shopMeta?.json?.myshopify_domain) evidence.push(`Store ID ${shopMeta.json.myshopify_domain}`);
-    if (home?.headers.get("x-shopid")) evidence.push("Shopify response headers");
+    if (home?.headers.get("x-shopid") || /shopify/i.test(home?.headers.get("powered-by") ?? "")) {
+      evidence.push("Shopify response headers");
+    }
+    if (/store is unavailable|opening soon/i.test(title ?? "") || /\/password\b/.test(home?.finalUrl ?? "")) {
+      notes.push("This Shopify store is closed or password-protected right now, so its theme and products are hidden.");
+    }
 
     shop = { name: "Shopify", version: null };
     if (shopifyThemeJson) {

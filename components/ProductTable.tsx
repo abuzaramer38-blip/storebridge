@@ -49,9 +49,9 @@ export function ProductTable({ products, accent }: { products: NormalizedProduct
   }
 
   return (
-    <div className="overflow-hidden rounded-xl border border-border bg-surface">
-      <div className="flex items-center justify-between gap-3 border-b border-border px-4 py-3">
-        <div className="relative w-64">
+    <div className="overflow-hidden rounded-xl border-2 border-ink bg-surface">
+      <div className="flex flex-wrap items-center justify-between gap-3 border-b-2 border-ink px-4 py-3">
+        <div className="relative w-full sm:w-72">
           <Search className="pointer-events-none absolute left-2.5 top-1/2 h-4 w-4 -translate-y-1/2 text-text-faint" />
           <Input
             value={query}
@@ -60,7 +60,7 @@ export function ProductTable({ products, accent }: { products: NormalizedProduct
             className="pl-8"
           />
         </div>
-        <span className="text-xs text-text-muted">
+        <span className="text-sm text-text-muted">
           {filtered.length === products.length
             ? `${products.length} product${products.length === 1 ? "" : "s"}`
             : `${filtered.length} of ${products.length}`}
@@ -68,9 +68,9 @@ export function ProductTable({ products, accent }: { products: NormalizedProduct
       </div>
 
       <div className="max-h-[560px] overflow-auto">
-        <table className="w-full border-collapse text-left text-sm">
+        <table className="w-full min-w-[720px] border-collapse text-left text-sm">
           <thead className="sticky top-0 z-10 bg-surface">
-            <tr className="border-b border-border text-xs uppercase tracking-wide text-text-faint">
+            <tr className="border-b border-border text-sm text-text-muted">
               <th className="px-4 py-2.5 font-medium">Product</th>
               <th className="px-4 py-2.5 font-medium">Categories</th>
               <th className="px-4 py-2.5 font-medium">Price</th>
@@ -87,7 +87,7 @@ export function ProductTable({ products, accent }: { products: NormalizedProduct
               return (
                 <tr
                   key={product.id}
-                  className="animate-row-in border-b border-border last:border-0 hover:bg-surface-hover"
+                  className="border-b border-border last:border-0 hover:bg-surface-hover"
                 >
                   <td className="px-4 py-2.5">
                     <div className="flex items-center gap-3">
@@ -103,8 +103,8 @@ export function ProductTable({ products, accent }: { products: NormalizedProduct
                         )}
                       </div>
                       <div className="min-w-0">
-                        <div className="truncate font-medium text-text">{product.title}</div>
-                        <div className="truncate font-mono text-xs text-text-faint">
+                        <div className="max-w-[28rem] truncate font-semibold text-ink">{product.title}</div>
+                        <div className="truncate text-xs text-text-faint">
                           {product.variants[0]?.sku || product.handle || "—"}
                         </div>
                       </div>
@@ -126,7 +126,7 @@ export function ProductTable({ products, accent }: { products: NormalizedProduct
                       )}
                     </div>
                   </td>
-                  <td className="px-4 py-2.5 font-mono text-text">{priceLabel(product)}</td>
+                  <td className="whitespace-nowrap px-4 py-2.5 font-semibold text-ink">{priceLabel(product)}</td>
                   <td className="px-4 py-2.5">
                     <Badge tone={stock.tone}>{stock.label}</Badge>
                   </td>

@@ -31,11 +31,12 @@ export async function GET(request: Request) {
 
     return NextResponse.json({ success: true, result });
   } catch (error) {
-    const status = error instanceof PublicUrlError ? 400 : 502;
+    // A store that can't be ranked is an expected answer, not a server failure.
+    const status = error instanceof PublicUrlError ? 400 : error instanceof BestsellersError ? 200 : 502;
     const message =
       error instanceof PublicUrlError || error instanceof BestsellersError
         ? error.message
-        : "Couldn't reach the store. Check the link and try again.";
+        : `Couldn't reach the store (${error instanceof Error ? error.message : "unknown error"}). Check the link and try again.`;
     return NextResponse.json({ success: false, error: message }, { status });
   }
 }

@@ -41,18 +41,18 @@ export function ExportPanel({
   }
 
   return (
-    <div className="rounded-xl border border-border bg-surface p-4">
+    <div className="label-sheet p-5 sm:p-6">
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div>
-          <h3 className="text-sm font-medium text-text">Export</h3>
-          <p className="mt-0.5 text-xs text-text-muted">
+          <h3 className="font-wide text-lg font-bold text-ink">Export</h3>
+          <p className="mt-0.5 text-sm text-text-muted">
             {products.length > 0
-              ? `${products.length} product${products.length === 1 ? "" : "s"} ready · ${rowCount} CSV row${rowCount === 1 ? "" : "s"} in this format`
+              ? `${products.length.toLocaleString()} product${products.length === 1 ? "" : "s"} ready, ${rowCount.toLocaleString()} CSV row${rowCount === 1 ? "" : "s"} in this format`
               : "Fetch products above to enable export."}
           </p>
         </div>
 
-        <div className="inline-flex rounded-lg border border-border-strong bg-surface-raised p-1">
+        <div className="inline-flex rounded-lg border-2 border-ink bg-surface p-1">
           <FormatToggleButton active={format === "shopify"} onClick={() => setFormat("shopify")}>
             Shopify CSV
           </FormatToggleButton>
@@ -62,10 +62,10 @@ export function ExportPanel({
         </div>
       </div>
 
-      <div className="mt-3 flex gap-2 rounded-lg border border-border bg-bg/40 p-3 text-xs text-text-muted">
+      <div className="mt-4 flex gap-2 rounded-lg border border-border bg-surface-hover p-3 text-sm text-text-muted">
         <Info className="mt-0.5 h-3.5 w-3.5 shrink-0 text-text-faint" />
         <p>
-          {isMigration && <span className="font-medium text-text">Migrating platforms — </span>}
+          {isMigration && <span className="font-semibold text-ink">Switching platforms. </span>}
           {FORMAT_NOTES[format]}
         </p>
       </div>
@@ -102,8 +102,8 @@ function FormatToggleButton({
       type="button"
       onClick={onClick}
       className={cn(
-        "rounded-md px-3 py-1.5 text-xs font-medium transition-colors",
-        active ? "bg-surface text-text shadow-sm" : "text-text-muted hover:text-text"
+        "rounded-md px-3 py-1.5 text-sm font-semibold transition-colors",
+        active ? "bg-ink text-white" : "text-text-muted hover:text-ink"
       )}
     >
       {children}
