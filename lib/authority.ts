@@ -43,8 +43,17 @@ async function openPageRank(domain: string, key: string) {
     headers: { "API-OPR": key, Accept: "application/json" },
     signal: AbortSignal.timeout(15_000),
   });
-  const json: any = await res.json().catch(() => null);
-  if (res.status === 401 || res.status === 403) throw new Error("Open PageRank rejected the API key.");
+  const text = await res.text();
+  let json: any = null;
+  try {
+    json = JSON.parse(text);
+  } catch {
+    // not JSON (e.g. a firewall page)
+  }
+  if (res.status === 401 || res.status === 403) {
+    const why = json?.error || json?.message || (json ? "" : text.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim().slice(0, 120));
+    throw new Error(`Open PageRank refused the request (HTTP ${res.status})${why ? `: ${why}` : ""}.`);
+  }
   if (res.status === 429) throw new Error("Open PageRank daily limit reached.");
   if (!res.ok) throw new Error(json?.error || `Open PageRank returned HTTP ${res.status}.`);
   const row = Array.isArray(json?.response) ? json.response[0] : null;
