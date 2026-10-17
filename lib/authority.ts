@@ -60,13 +60,35 @@ async function openPageRank(domain: string, key: string) {
   };
 }
 
+// IANA's official list of which registry answers RDAP lookups for each domain ending.
+let rdapBootstrap: { at: number; map: Map<string, string> } | null = null;
+
+async function rdapBaseFor(tld: string): Promise<string | null> {
+  if (!rdapBootstrap || Date.now() - rdapBootstrap.at > 24 * 3600 * 1000) {
+    const res = await fetch("https://data.iana.org/rdap/dns.json", { signal: AbortSignal.timeout(10_000) });
+    const json: any = await res.json();
+    const map = new Map<string, string>();
+    for (const [tlds, urls] of json?.services ?? []) {
+      const base = (urls as string[]).find((u) => u.startsWith("https://")) ?? (urls as string[])[0];
+      for (const t of tlds as string[]) map.set(t.toLowerCase(), base.endsWith("/") ? base : `${base}/`);
+    }
+    rdapBootstrap = { at: Date.now(), map };
+  }
+  return rdapBootstrap.map.get(tld) ?? null;
+}
+
 async function domainAge(domain: string) {
-  const res = await fetch(`https://rdap.org/domain/${encodeURIComponent(domain)}`, {
+  const tld = domain.split(".").pop() ?? "";
+  const base = await rdapBaseFor(tld).catch(() => null);
+  const url = base ? `${base}domain/${encodeURIComponent(domain)}` : `https://rdap.org/domain/${encodeURIComponent(domain)}`;
+  const res = await fetch(url, {
     headers: { Accept: "application/rdap+json, application/json" },
     redirect: "follow",
     signal: AbortSignal.timeout(12_000),
   });
-  if (res.status === 404) return { registered: null, years: null, error: "This domain ending has no public registry lookup." };
+  if (!base && res.status === 404) {
+    return { registered: null, years: null, error: "This domain ending has no public registry lookup." };
+  }
   const json: any = await res.json().catch(() => null);
   const ev = Array.isArray(json?.events) ? json.events.find((e: any) => e?.eventAction === "registration") : null;
   if (!ev?.eventDate) return { registered: null, years: null, error: "The registry didn't share a registration date." };
