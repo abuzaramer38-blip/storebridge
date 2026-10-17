@@ -175,6 +175,25 @@ function shopifyRow(p: any, rank: number, origin: string): BestsellerRow {
   };
 }
 
+const NOT_A_HANDLE = /\.(?:jpe?g|png|gif|webp|avif|svg|js|json|css|mp4|webm)$/i;
+
+/** Product handles in the order they appear: links (/products/x) and embedded data ("handle":"x"). */
+function extractHandles(html: string): string[] {
+  const out: string[] = [];
+  const seen = new Set<string>();
+  const re = /(?:\/products\/|"handle"\s*:\s*")([a-z0-9][a-z0-9%_-]*(?:\.[a-z0-9]+)?)/gi;
+  for (const m of html.matchAll(re)) {
+    // Skip old-style CDN image paths like cdn.shopify.com/.../products/photo.jpg
+    const before = html.slice(Math.max(0, m.index - 60), m.index);
+    if (/cdn\.shopify\.com|\/files\//i.test(before)) continue;
+    const h = decodeURIComponent(m[1]).toLowerCase();
+    if (NOT_A_HANDLE.test(h) || seen.has(h)) continue;
+    seen.add(h);
+    out.push(h);
+  }
+  return out;
+}
+
 async function shopifyJsonHonoursSort(origin: string, diag: string[]): Promise<boolean> {
   const get = (sort: string) =>
     fetchJson<any>(`${origin}/collections/all/products.json?sort_by=${sort}&limit=30`, 15_000)
@@ -214,30 +233,47 @@ async function shopifyBestsellers(origin: string, limit: number): Promise<Bestse
       if (list.length < Math.min(250, limit)) break;
     }
   } else {
-    // Read the storefront's best-selling page and keep product links in the order they appear.
+    // Read the storefront's best-selling page. Header/footer menus link to products too, so the
+    // same page sorted A–Z is read alongside: links sitting in the same spot on both pages are
+    // menu links, and only the part that changes with the sort order is the product grid.
     method = "Shopify's “Best selling” page on the storefront";
+    const listing = (sort: string, page: number) =>
+      fetchText(`${origin}/collections/all?sort_by=${sort}&page=${page}`, 20_000).catch(() => null);
+
+    const [first, alpha] = await Promise.all([listing("best-selling", 1), listing("title-ascending", 1)]);
+    if (!first || first.status >= 400) {
+      throw new BestsellersError(`The store's product listing page didn't load (HTTP ${first?.status ?? "error"}).`, diag);
+    }
+    const a = extractHandles(first.text);
+    const b = alpha && alpha.status < 400 ? extractHandles(alpha.text) : [];
+    let pre = 0;
+    while (pre < a.length && pre < b.length && a[pre] === b[pre]) pre += 1;
+    let suf = 0;
+    while (suf < a.length - pre && suf < b.length - pre && a[a.length - 1 - suf] === b[b.length - 1 - suf]) suf += 1;
+    const menu = new Set([...a.slice(0, pre), ...a.slice(a.length - suf)]);
+    diag.push(`listing page 1: ${a.length} product links, ${menu.size} look like menu links`);
+
     const handles: string[] = [];
-    const seen = new Set<string>();
-    for (let page = 1; handles.length < limit && page <= 15 && Date.now() < deadline; page += 1) {
-      const r = await fetchText(`${origin}/collections/all?sort_by=best-selling&page=${page}`, 20_000).catch(() => null);
-      if (!r || r.status >= 400) {
-        if (page === 1) {
-          throw new BestsellersError(`The store's product listing page didn't load (HTTP ${r?.status ?? "error"}).`, diag);
-        }
-        break;
-      }
-      if (page === 1) diag.push(`listing page: HTTP ${r.status}, final URL ${r.finalUrl}, ${r.text.length} bytes`);
+    const seen = new Set<string>(menu);
+    const take = (list: string[]) => {
       let added = 0;
-      for (const m of r.text.matchAll(/href="(?:https?:\/\/[^"/]+)?(?:\/[a-z]{2}(?:-[a-z]{2})?)?(?:\/collections\/[^"/?]+)?\/products\/([A-Za-z0-9%._-]+)/g)) {
-        const h = m[1];
+      for (const h of list) {
         if (!seen.has(h)) {
           seen.add(h);
           handles.push(h);
           added += 1;
         }
       }
-      if (page === 1) diag.push(`listing page 1: ${added} product links`);
-      if (added === 0) break;
+      return added;
+    };
+    take(a.slice(pre, a.length - suf));
+    if (handles.length === 0 && a.length > 0) {
+      diag.push("best-selling and A–Z pages list the same products in the same order");
+    }
+    for (let page = 2; handles.length > 0 && handles.length < limit && page <= 15 && Date.now() < deadline; page += 1) {
+      const r = await listing("best-selling", page);
+      if (!r || r.status >= 400) break;
+      if (take(extractHandles(r.text)) === 0) break;
     }
     const picked = handles.slice(0, limit);
     const details = await withConcurrency(picked, 6, async (h) => {
@@ -253,7 +289,7 @@ async function shopifyBestsellers(origin: string, limit: number): Promise<Bestse
 
   if (rows.length === 0) {
     throw new BestsellersError(
-      "This Shopify store doesn't show its best-seller order publicly (its product grid may load with JavaScript).",
+      "This Shopify store doesn't show its best-seller order to visitors, so it can't be read from outside.",
       diag
     );
   }
