@@ -5,7 +5,9 @@
  *  - Domain Rating (DR) — Ahrefs, via its free public endpoint (needs a free API v3 key).
  *  - Domain Authority (DA), Page Authority and Spam Score — Moz, via its JSON-RPC API
  *    (free plan: 50 rows a month, one request every 10 seconds).
- * Keys live in env vars: AHREFS_API_KEY and MOZ_API_TOKEN.
+ *  - Open PageRank (0–10) — a free authority score from DomCop's Open PageRank (free key).
+ *  - Domain age — from the public RDAP registry lookup, no key needed.
+ * Keys live in env vars: AHREFS_API_KEY, MOZ_API_TOKEN, OPENPAGERANK_API_KEY.
  */
 
 export interface AuthorityResult {
@@ -19,6 +21,58 @@ export interface AuthorityResult {
     linkingDomains: number | null;
     error: string | null;
   };
+  openPageRank: { configured: boolean; score: number | null; globalRank: number | null; error: string | null };
+  age: { registered: string | null; years: number | null; error: string | null };
+}
+
+const TWO_PART_SUFFIXES = new Set([
+  "co.uk", "org.uk", "me.uk", "ltd.uk", "plc.uk", "com.au", "net.au", "org.au", "co.nz", "com.pk", "net.pk", "org.pk",
+  "co.in", "com.br", "com.mx", "co.za", "com.tr", "com.sg", "com.my", "co.jp", "com.cn", "com.hk", "co.kr", "com.ar",
+]);
+
+/** The registrable domain (shop.example.co.uk → example.co.uk), which is what registries know about. */
+export function registrableDomain(host: string): string {
+  const parts = host.toLowerCase().replace(/^www\./, "").split(".");
+  if (parts.length <= 2) return parts.join(".");
+  const lastTwo = parts.slice(-2).join(".");
+  return TWO_PART_SUFFIXES.has(lastTwo) ? parts.slice(-3).join(".") : lastTwo;
+}
+
+async function openPageRank(domain: string, key: string) {
+  const res = await fetch(`https://openpagerank.com/api/v1.0/getPageRank?domains%5B%5D=${encodeURIComponent(domain)}`, {
+    headers: { "API-OPR": key, Accept: "application/json" },
+    signal: AbortSignal.timeout(15_000),
+  });
+  const json: any = await res.json().catch(() => null);
+  if (res.status === 401 || res.status === 403) throw new Error("Open PageRank rejected the API key.");
+  if (res.status === 429) throw new Error("Open PageRank daily limit reached.");
+  if (!res.ok) throw new Error(json?.error || `Open PageRank returned HTTP ${res.status}.`);
+  const row = Array.isArray(json?.response) ? json.response[0] : null;
+  if (!row || (row.status_code && row.status_code !== 200)) {
+    return { score: null, globalRank: null, error: row?.error ? String(row.error) : "Not in Open PageRank's index yet." };
+  }
+  const score = Number(row.page_rank_decimal);
+  const rank = Number(row.rank);
+  return {
+    score: Number.isFinite(score) ? Math.round(score * 100) / 100 : null,
+    globalRank: Number.isFinite(rank) && rank > 0 ? rank : null,
+    error: null,
+  };
+}
+
+async function domainAge(domain: string) {
+  const res = await fetch(`https://rdap.org/domain/${encodeURIComponent(domain)}`, {
+    headers: { Accept: "application/rdap+json, application/json" },
+    redirect: "follow",
+    signal: AbortSignal.timeout(12_000),
+  });
+  if (res.status === 404) return { registered: null, years: null, error: "This domain ending has no public registry lookup." };
+  const json: any = await res.json().catch(() => null);
+  const ev = Array.isArray(json?.events) ? json.events.find((e: any) => e?.eventAction === "registration") : null;
+  if (!ev?.eventDate) return { registered: null, years: null, error: "The registry didn't share a registration date." };
+  const date = new Date(ev.eventDate);
+  const years = Math.max(0, (Date.now() - date.getTime()) / (365.25 * 24 * 3600 * 1000));
+  return { registered: date.toISOString().slice(0, 10), years: Math.round(years * 10) / 10, error: null };
 }
 
 export function bareDomain(origin: string): string {
@@ -80,8 +134,10 @@ export async function getAuthority(origin: string): Promise<AuthorityResult> {
   const domain = bareDomain(origin);
   const ahrefsKey = process.env.AHREFS_API_KEY?.trim();
   const mozToken = process.env.MOZ_API_TOKEN?.trim();
+  const oprKey = process.env.OPENPAGERANK_API_KEY?.trim();
+  const root = registrableDomain(domain);
 
-  const [ahrefs, moz] = await Promise.all([
+  const [ahrefs, moz, opr, age] = await Promise.all([
     ahrefsKey
       ? ahrefsDomainRating(domain, ahrefsKey).then(
           (dr) => ({ configured: true, domainRating: dr, error: null }),
@@ -108,7 +164,14 @@ export async function getAuthority(origin: string): Promise<AuthorityResult> {
           linkingDomains: null,
           error: null,
         }),
+    oprKey
+      ? openPageRank(root, oprKey).then(
+          (r) => ({ configured: true, ...r }),
+          (e: Error) => ({ configured: true, score: null, globalRank: null, error: e.message })
+        )
+      : Promise.resolve({ configured: false, score: null, globalRank: null, error: null }),
+    domainAge(root).catch(() => ({ registered: null, years: null, error: "The registry lookup didn't respond." })),
   ]);
 
-  return { domain, ahrefs, moz };
+  return { domain, ahrefs, moz, openPageRank: opr, age };
 }

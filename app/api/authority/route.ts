@@ -9,7 +9,7 @@ export const maxDuration = 30;
 const memo = new Map<string, { at: number; result: AuthorityResult }>();
 const DAY = 24 * 60 * 60 * 1000;
 
-/** GET /api/authority?url=store.com — Ahrefs DR, Moz DA / PA / Spam Score. */
+/** GET /api/authority?url=store.com — Ahrefs DR, Open PageRank, domain age, and Moz DA / Spam Score when set up. */
 export async function GET(request: Request) {
   const raw = new URL(request.url).searchParams.get("url");
   if (!raw) {
@@ -24,10 +24,10 @@ export async function GET(request: Request) {
       result = hit.result;
     } else {
       result = await getAuthority(origin);
-      const failed = result.ahrefs.error || result.moz.error;
+      const failed = result.ahrefs.error || result.moz.error || result.openPageRank.error;
       if (!failed) memo.set(key, { at: Date.now(), result });
     }
-    const cacheable = !result.ahrefs.error && !result.moz.error && (result.ahrefs.configured || result.moz.configured);
+    const cacheable = !result.ahrefs.error && !result.moz.error && !result.openPageRank.error;
     return NextResponse.json(
       { success: true, result },
       { headers: { "Cache-Control": cacheable ? "public, s-maxage=86400, stale-while-revalidate=3600" : "no-store" } }
