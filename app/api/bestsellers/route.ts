@@ -37,6 +37,7 @@ export async function GET(request: Request) {
       error instanceof PublicUrlError || error instanceof BestsellersError
         ? error.message
         : `Couldn't reach the store (${error instanceof Error ? error.message : "unknown error"}). Check the link and try again.`;
-    return NextResponse.json({ success: false, error: message }, { status });
+    const details = error instanceof BestsellersError ? error.details : undefined;
+    return NextResponse.json({ success: false, error: message, details }, { status });
   }
 }

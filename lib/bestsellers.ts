@@ -30,7 +30,13 @@ export interface BestsellersResult {
   totalProducts: number | null;
 }
 
-export class BestsellersError extends Error {}
+export class BestsellersError extends Error {
+  details: string[];
+  constructor(message: string, details: string[] = []) {
+    super(message);
+    this.details = details;
+  }
+}
 
 function decode(s: string): string {
   return s
@@ -169,21 +175,33 @@ function shopifyRow(p: any, rank: number, origin: string): BestsellerRow {
   };
 }
 
-async function shopifyJsonHonoursSort(origin: string): Promise<boolean> {
+async function shopifyJsonHonoursSort(origin: string, diag: string[]): Promise<boolean> {
   const get = (sort: string) =>
     fetchJson<any>(`${origin}/collections/all/products.json?sort_by=${sort}&limit=30`, 15_000)
-      .then((r) => (Array.isArray(r.json?.products) ? (r.json.products as any[]).map((p) => String(p.title)) : null))
-      .catch(() => null);
+      .then((r) => {
+        if (!Array.isArray(r.json?.products)) {
+          diag.push(`collections/all JSON (${sort}): HTTP ${r.status}, no product list`);
+          return null;
+        }
+        return (r.json.products as any[]).map((p) => String(p.title));
+      })
+      .catch((e) => {
+        diag.push(`collections/all JSON (${sort}): ${e instanceof Error ? e.message : "failed"}`);
+        return null;
+      });
   const [asc, desc] = await Promise.all([get("title-ascending"), get("title-descending")]);
-  return !!asc && !!desc && asc.length > 2 && isSorted(asc, 1) && isSorted(desc, -1);
+  const ok = !!asc && !!desc && asc.length > 2 && isSorted(asc, 1) && isSorted(desc, -1);
+  if (asc && desc) diag.push(`collections/all JSON sorting ${ok ? "works" : "is ignored"} (${asc.length} items)`);
+  return ok;
 }
 
 async function shopifyBestsellers(origin: string, limit: number): Promise<BestsellersResult> {
   const deadline = Date.now() + 45_000;
   let rows: BestsellerRow[] = [];
   let method = "";
+  const diag: string[] = [];
 
-  if (await shopifyJsonHonoursSort(origin)) {
+  if (await shopifyJsonHonoursSort(origin, diag)) {
     method = "Shopify's own “Best selling” collection sort";
     for (let page = 1; rows.length < limit && Date.now() < deadline; page += 1) {
       const r = await fetchJson<any>(
@@ -203,9 +221,12 @@ async function shopifyBestsellers(origin: string, limit: number): Promise<Bestse
     for (let page = 1; handles.length < limit && page <= 15 && Date.now() < deadline; page += 1) {
       const r = await fetchText(`${origin}/collections/all?sort_by=best-selling&page=${page}`, 20_000).catch(() => null);
       if (!r || r.status >= 400) {
-        if (page === 1) throw new BestsellersError(`The store's product listing page didn't load (HTTP ${r?.status ?? "error"}).`);
+        if (page === 1) {
+          throw new BestsellersError(`The store's product listing page didn't load (HTTP ${r?.status ?? "error"}).`, diag);
+        }
         break;
       }
+      if (page === 1) diag.push(`listing page: HTTP ${r.status}, final URL ${r.finalUrl}, ${r.text.length} bytes`);
       let added = 0;
       for (const m of r.text.matchAll(/href="(?:https?:\/\/[^"/]+)?(?:\/[a-z]{2}(?:-[a-z]{2})?)?(?:\/collections\/[^"/?]+)?\/products\/([A-Za-z0-9%._-]+)/g)) {
         const h = m[1];
@@ -215,6 +236,7 @@ async function shopifyBestsellers(origin: string, limit: number): Promise<Bestse
           added += 1;
         }
       }
+      if (page === 1) diag.push(`listing page 1: ${added} product links`);
       if (added === 0) break;
     }
     const picked = handles.slice(0, limit);
@@ -226,9 +248,15 @@ async function shopifyBestsellers(origin: string, limit: number): Promise<Bestse
     rows = details
       .filter((p): p is any => !!p)
       .map((p, i) => shopifyRow(p, i + 1, origin));
+    diag.push(`product details: ${rows.length} of ${picked.length} loaded`);
   }
 
-  if (rows.length === 0) throw new BestsellersError("No products came back from this Shopify store.");
+  if (rows.length === 0) {
+    throw new BestsellersError(
+      "This Shopify store doesn't show its best-seller order publicly (its product grid may load with JavaScript).",
+      diag
+    );
+  }
 
   const meta = await fetchJson<any>(`${origin}/meta.json`, 8_000).catch(() => null);
   return {
