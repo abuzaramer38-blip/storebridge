@@ -7,6 +7,7 @@ import { Badge, PlatformMark } from "@/components/ui/Badge";
 import { EmptyState, Notice } from "@/components/ui/Feedback";
 import type { DetectedPlatform } from "@/components/Dashboard";
 import { useAutoRun } from "@/components/useAutoRun";
+import { AuthorityBand } from "@/components/AuthorityBand";
 
 type State =
   | { kind: "idle" }
@@ -118,6 +119,10 @@ export function InspectPanel({
           <PlatformMark id={r.platform.id} name={r.platform.name} />
         </h2>
         <p className="mt-2 text-lg text-text-muted">{stack}</p>
+      </div>
+
+      <div className="mt-6 border-t border-border px-6 pt-5 sm:px-8">
+        <AuthorityBand key={r.url} url={r.url} />
       </div>
 
       <dl className="mt-6 grid gap-x-10 border-t border-border px-6 sm:grid-cols-2 sm:px-8">
