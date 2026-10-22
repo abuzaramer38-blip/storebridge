@@ -7,7 +7,11 @@ function cookiesFrom(res: Response, jar: Map<string, string>) {
 }
 const cookieHeader = (jar: Map<string, string>) => [...jar].map(([k, v]) => `${k}=${v}`).join("; ");
 export async function GET(req: Request) {
-  const u = new URL(req.url).searchParams.get("url")!;
+  try { return await run(req); } catch (e) { return NextResponse.json({ error: String((e as Error)?.stack || e) }); }
+}
+async function run(req: Request) {
+  let u = new URL(req.url).searchParams.get("p") || "/product/camp-chef-woodwind-pro-36-pellet-grills/";
+  u = new URL(u, "https://poorat.com").toString();
   const jar = new Map<string, string>();
   const log: any[] = [];
   let r = await fetch(u, { headers: { "User-Agent": UA }, redirect: "manual" });
