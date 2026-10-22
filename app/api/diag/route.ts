@@ -1,58 +1,54 @@
 import { NextResponse } from "next/server";
 export const maxDuration = 60;
 const UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126 Safari/537.36";
-function cookiesFrom(res: Response, jar: Map<string, string>) {
-  const list = (res.headers as any).getSetCookie?.() ?? [];
-  for (const c of list) { const [kv] = c.split(";"); const i = kv.indexOf("="); jar.set(kv.slice(0, i).trim(), kv.slice(i + 1)); }
+type Jar = Map<string, string>;
+function eat(res: Response, jar: Jar, raw: string[]) {
+  for (const c of (res.headers as any).getSetCookie?.() ?? []) {
+    raw.push(c.replace(/=([^;]{6})[^;]*/, "=$1…"));
+    const [kv] = c.split(";"); const i = kv.indexOf("="); const v = kv.slice(i + 1);
+    if (/deleted|^$/.test(v) || /expires=Thu, 01 Jan 1970/i.test(c)) jar.delete(kv.slice(0, i).trim()); else jar.set(kv.slice(0, i).trim(), v);
+  }
 }
-const cookieHeader = (jar: Map<string, string>) => [...jar].map(([k, v]) => `${k}=${v}`).join("; ");
+const ck = (j: Jar) => [...j].map(([k, v]) => `${k}=${v}`).join("; ");
+const hdrs = (r: Response) => Object.fromEntries([...r.headers].filter(([k]) => /cache|litespeed|x-|location|cf-|age|server/i.test(k)));
+async function step(url: string, jar: Jar, init: RequestInit = {}) {
+  const raw: string[] = [];
+  const r = await fetch(url, { ...init, headers: { "User-Agent": UA, Cookie: ck(jar), ...(init.headers || {}) }, redirect: "manual" });
+  eat(r, jar, raw);
+  const t = r.status === 200 ? await r.text() : "";
+  const items = t.match(/cart-contents-count[^>]*>\s*(\d+)/)?.[1] ?? t.match(/wd-cart-number[^>]*>\s*(\d+)/)?.[1];
+  return { url, status: r.status, headers: hdrs(r), setCookie: raw, emptyCart: /cart is currently empty|cart-empty/i.test(t), cartRows: (t.match(/class="[^"]*cart_item/g) || []).length, headerCount: items, checkoutForm: /form[^>]+name="checkout"/.test(t), gateways: [...new Set([...t.matchAll(/payment_method_([a-z0-9_-]+)/g)].map((m) => m[1]))], errors: [...t.matchAll(/woocommerce-error[^>]*>([\s\S]{0,300}?)<\/ul>/g)].map((m) => m[1].replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim()) };
+}
 export async function GET(req: Request) {
-  try { return await run(req); } catch (e) { return NextResponse.json({ error: String((e as Error)?.stack || e) }); }
-}
-async function run(req: Request) {
-  let u = new URL(req.url).searchParams.get("p") || "/product/camp-chef-woodwind-pro-36-pellet-grills/";
-  u = new URL(u, "https://poorat.com").toString();
-  const jar = new Map<string, string>();
-  const log: any[] = [];
-  let r = await fetch(u, { headers: { "User-Agent": UA }, redirect: "manual" });
-  cookiesFrom(r, jar);
-  const html = await r.text();
-  const formMatch = html.match(/<form[^>]*class="[^"]*cart[^"]*"[\s\S]*?<\/form>/);
-  const form = formMatch?.[0] ?? "";
-  log.push({ step: "product", status: r.status, formHtml: form.slice(0, 4000) });
-  const buyNowSnippets = [...html.matchAll(/.{0,300}buy[-_ ]?now.{0,300}/gi)].slice(0, 6).map((m) => m[0]);
-  log.push({ buyNowSnippets });
-  const scripts = [...html.matchAll(/<script[^>]+src="([^"]+)"/g)].map((m) => m[1]).filter((s) => /plugins|woodmart|cart|checkout/.test(s));
-  log.push({ scripts });
-  // Build form body
-  const body = new URLSearchParams();
-  for (const m of form.matchAll(/<(input|button)[^>]*>/g)) {
-    const tag = m[0];
-    const name = tag.match(/name="([^"]+)"/)?.[1]; const value = tag.match(/value="([^"]*)"/)?.[1] ?? "";
-    const type = tag.match(/type="([^"]+)"/)?.[1] ?? "";
-    if (!name) continue;
-    if (m[1] === "button" || type === "submit") { if (/buy/i.test(tag)) body.set(name, value || "1"); else if (name === "add-to-cart") body.set(name, value); continue; }
-    body.set(name, value || (name === "quantity" ? "1" : value));
-  }
-  const action = form.match(/action="([^"]*)"/)?.[1]?.replace(/&#0?38;|&amp;/g, "&") || u;
-  log.push({ post: action, body: body.toString() });
-  let target = new URL(action, u).toString();
-  r = await fetch(target, { method: "POST", body, headers: { "User-Agent": UA, "Content-Type": "application/x-www-form-urlencoded", Cookie: cookieHeader(jar), Referer: u }, redirect: "manual" });
-  cookiesFrom(r, jar);
-  for (let i = 0; i < 6; i++) {
-    const loc = r.headers.get("location");
-    const text = loc ? "" : await r.text();
-    const notices = [...text.matchAll(/class="[^"]*(woocommerce-(message|error|info)|wd-notice)[^"]*"[^>]*>([\s\S]{0,400}?)<\/(div|ul|li)/g)].map((m) => m[3].replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim());
-    log.push({ step: `hop${i}`, url: target, status: r.status, location: loc, title: text.match(/<title>([^<]*)/)?.[1], notices, checkoutForm: /form[^>]+checkout/.test(text), emptyCart: /cart is currently empty|cart-empty/i.test(text) });
-    if (!loc) break;
-    target = new URL(loc, target).toString();
-    r = await fetch(target, { headers: { "User-Agent": UA, Cookie: cookieHeader(jar) }, redirect: "manual" });
-    cookiesFrom(r, jar);
-  }
-  // explicit checkout check
-  const c = await fetch(new URL("/checkout/", u), { headers: { "User-Agent": UA, Cookie: cookieHeader(jar) }, redirect: "manual" });
-  const ct = c.status === 200 ? await c.text() : "";
-  log.push({ step: "checkout", status: c.status, location: c.headers.get("location"), checkoutForm: /form[^>]+checkout/.test(ct), gateways: [...ct.matchAll(/payment_method_([a-z0-9_-]+)/g)].map((m) => m[1]).filter((v, i, a) => a.indexOf(v) === i) });
-  log.push({ cookies: [...jar.keys()] });
-  return NextResponse.json(log);
+  try {
+    const p = new URL(req.url).searchParams.get("p") || "/product/camp-chef-woodwind-pro-36-pellet-grills/";
+    const u = new URL(p, "https://poorat.com").toString();
+    const out: any[] = [];
+    // A: plain add to cart via query string, then cart
+    let jar: Jar = new Map();
+    out.push({ A: await step("https://poorat.com/?add-to-cart=21420&quantity=1", jar) });
+    out.push({ A: await step("https://poorat.com/cart/", jar) });
+    out.push({ A_cookies: [...jar.keys()] });
+    // B: Store API (no page cache)
+    jar = new Map();
+    const raw: string[] = [];
+    let r = await fetch("https://poorat.com/wp-json/wc/store/v1/cart", { headers: { "User-Agent": UA }, redirect: "manual" });
+    eat(r, jar, raw);
+    const nonce = r.headers.get("nonce") || r.headers.get("x-wc-store-api-nonce") || "";
+    const cartToken = r.headers.get("cart-token") || "";
+    r = await fetch("https://poorat.com/wp-json/wc/store/v1/cart/add-item", { method: "POST", headers: { "User-Agent": UA, "Content-Type": "application/json", Nonce: nonce, "Cart-Token": cartToken, Cookie: ck(jar) }, body: JSON.stringify({ id: 21420, quantity: 1 }) });
+    eat(r, jar, raw);
+    const body: any = await r.json().catch(() => null);
+    out.push({ B_add: { status: r.status, items: body?.items_count, err: body?.message, code: body?.code } });
+    r = await fetch("https://poorat.com/wp-json/wc/store/v1/cart", { headers: { "User-Agent": UA, "Cart-Token": r.headers.get("cart-token") || cartToken, Cookie: ck(jar) } });
+    const b2: any = await r.json().catch(() => null);
+    out.push({ B_after: { status: r.status, items: b2?.items_count, payment_methods: b2?.payment_methods, needs_shipping: b2?.needs_shipping, shipping_rates: b2?.shipping_rates?.[0]?.shipping_rates?.map((s: any) => s.name), errors: b2?.errors } });
+    // C: buy now POST, then checkout
+    jar = new Map();
+    out.push({ C: await step(u, jar) });
+    out.push({ C: await step(u, jar, { method: "POST", headers: { "Content-Type": "application/x-www-form-urlencoded", Referer: u }, body: "quantity=1&add-to-cart=21420&wd-add-to-cart=21420" }) });
+    out.push({ C: await step("https://poorat.com/checkout/", jar) });
+    out.push({ C_cookies: [...jar.keys()] });
+    return NextResponse.json(out);
+  } catch (e) { return NextResponse.json({ error: String((e as Error)?.stack || e) }); }
 }
